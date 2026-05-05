@@ -13,7 +13,7 @@ sentinel-coming/
 ├── agentic/              → ⚠️ Bağımsız 3 harici ürün (bkz. aşağıdaki not)
 │   ├── Pywen-dev/
 │   ├── codex-main/
-│   └── claude/
+│   └── cli-claude/
 ├── skills/               → COS / Juju kurulum skill kılavuzları (Faz 1)
 ├── cli/skills/           → CLI agent skill dokümanları (Faz 2+, 65+ skill)
 ├── documantations/       → Mimari, implementasyon planları, faz dokümanları
@@ -40,8 +40,99 @@ Python tabanlı, agentic mimariye sahip terminal aracı. Doğal dil komutlarıyl
 - Katmanlı konfigürasyon sistemi (YAML profilleri + env override)
 - Oturum kalıcılığı ve trajectory kaydı (debugging için)
 - Grafana entegrasyon kontrolleri
+- **Proje bellek sistemi** (memory extract, dream konsolidasyonu, magic docs)
+- **Gizli bilgi redaksiyonu** (tüm bellek yazımlarında otomatik)
+- **Tur sonu pipeline** (hook'lar, away özeti, arka plan thread desteği)
 
 **CI:** GitHub Actions → Python 3.12, ruff lint, pytest
+
+---
+
+#### Proje Bellek Sistemi
+
+Her başarılı tur sonunda agent döngüsü bir **tur sonu pipeline** çalıştırır. Bu pipeline sırasıyla şunları yapar:
+
+1. **`post_turn` hook'u** çalıştırır.
+2. **Bellek çıkarma (extract):** Tur mesajlarının özeti `.sentinel/memory/extract.jsonl` veya `~/.sentinel/projects/<hash>/memory/extract.jsonl` dosyasına eklenir.
+3. **Away özeti:** `repl` oturumlarında son kullanıcı + asistan mesajından tek satırlık özet üretilir.
+4. **Magic Docs güncelleme:** `# MAGIC DOC` başlıklı Markdown dosyalarındaki `<!-- SENTINEL_MAGIC_DOC:BEGIN -->` ... `<!-- SENTINEL_MAGIC_DOC:END -->` bloğu güncel özetle değiştirilir (varsayılan kökler: `skills/`, `documantations/`).
+5. **Dream konsolidasyonu:** Süre (min 24 saat) + oturum sayısı (min 5) eşiği sağlandığında LLM ile `index.md` güncellenir; dosya kilidi ile paralel çalışma önlenir.
+
+Tüm bellek yazımları **redaksiyon filtresi**nden geçer; email, API token, Bearer header, export ifadeleri, parola atamaları, kubeconfig kimlik bilgileri, AWS AKIA anahtarları, JWT ve PEM blokları otomatik olarak temizlenir.
+
+**Bellek politikası:**
+- `policy: project` → `<proje_dizini>/.sentinel/memory/`
+- `policy: user` → `~/.sentinel/projects/<cwd_hash>/memory/`
+- `enforce_write_jail: true` → dosya yazma aracı yalnızca bellek köküne izin verir
+- `allow_non_interactive: false` → `--bare` / pipe modunda bellek yazımları kapalı
+
+**Konfigürasyon (sentinel.yaml):**
+```yaml
+memory:
+  enabled: false            # bellek sistemini etkinleştirir
+  directory: null           # null ise policy ile belirlenir
+  policy: project           # "project" | "user"
+  extract_on_turn_end: true
+  allow_non_interactive: false
+  enforce_write_jail: false
+
+dream:
+  enabled: false
+  min_hours_between: 24
+  min_sessions: 5
+  lock_stale_sec: 3600
+
+turn_pipeline:
+  enabled: true
+  run_in_background: false  # true ise arka plan thread'inde çalışır
+
+semantic_compaction:
+  inject_trim_notice: true
+  persist_session_memory_path: true
+
+magic_docs:
+  enabled: false
+  title_marker: MAGIC DOC
+  begin_marker: "<!-- SENTINEL_MAGIC_DOC:BEGIN -->"
+  end_marker: "<!-- SENTINEL_MAGIC_DOC:END -->"
+  roots:
+    - skills
+    - documantations
+  max_files: 32
+
+away:
+  enabled: true
+  max_chars: 200
+```
+
+**Ortam değişkenleri ile hızlı etkinleştirme:**
+```bash
+SENTINEL_MEMORY_ENABLED=1
+SENTINEL_DREAM_ENABLED=1
+SENTINEL_DREAM_MIN_HOURS=24
+SENTINEL_DREAM_MIN_SESSIONS=5
+SENTINEL_MEMORY_DIR=~/.sentinel/my-project/memory
+```
+
+---
+
+#### Araç Güvenliği İyileştirmeleri
+
+**Bash read-only modu:** `tools.bash_read_only: true` ile bash aracı yalnızca güvenli okuma komutlarına (`ls`, `cat`, `head`, `tail`, `grep`, `find`, `pwd`, `echo`, `wc`, `stat`, `sort`, `uniq`, `git`) izin verir; yönlendirme, pipe, komut substitution ve arka plan çalıştırma engellenir.
+
+**Memory write jail:** `memory.enforce_write_jail: true` ile `write_file` aracı yalnızca bellek kök dizinine yazabilir; bu dizin dışındaki tüm yazma girişimleri reddedilir.
+
+**Yeni hook fazları:** `pre_memory` ve `post_memory` hook fazları eklendi. Bellek extract/dream işlemleri öncesi ve sonrası özel komutlar çalıştırılabilir.
+
+```yaml
+hooks:
+  enabled: true
+  # phase: pre_tool | post_tool | post_turn | pre_memory | post_memory
+  commands:
+    - phase: pre_memory
+      command: ["echo", "bellek yazılıyor"]
+      on_error: warn
+```
 
 ---
 
@@ -94,6 +185,7 @@ Sentinel CLI'nin agent döngüsüne entegre edilmiş 65+ SKILL.md dosyası. Her 
 | `PHASE*_SKILL_AND_DOC_INDEX.md` | Her faza ait skill ve doküman kataloğu |
 | `ENV_FLAGS_PHASE*.md` | Faz bazlı environment değişkenleri ve feature flag'ler |
 | `GRAFANA_AI_PLATFORM_RESEARCH.md` | Grafana LLM Platform araştırması |
+| `INTEGRATION_SENTINEL_CLI_FROM_CLI_CLAUDE.md` | cli-claude'dan Sentinel'e taşınan bellek/güvenlik davranışları referans haritası |
 
 ---
 
@@ -101,6 +193,7 @@ Sentinel CLI'nin agent döngüsüne entegre edilmiş 65+ SKILL.md dosyası. Her 
 
 - **`cos-microk8s-start.sh`** — MicroK8s'i güvenli şekilde başlatır; Kubernetes API, node hazırlığı ve Juju agent stabilizasyonunu bekler. Erken hook çalışmasını önlemek için 45 saniyelik stabilizasyon gecikmesi içerir.
 - **`cos-microk8s-heal.sh`** — Host IP değişince Juju kubeconfig drift'ini ve `kubelet.crt` SAN uyumsuzluğunu onarır; gerekirse MicroK8s'i yeniden başlatır.
+- **`auto-push-watch.sh`** — Repo değişikliklerini izleyerek otomatik commit + push yapar.
 
 ---
 
@@ -145,8 +238,8 @@ Host OS
 |---|---|
 | Anthropic | Claude (Opus, Sonnet, Haiku) |
 | OpenAI-compatible | GPT-4, GPT-3.5, Ollama (yerel) |
-| Google | Gemini (Pywen üzerinden) |
-| Alibaba | Qwen3-Coder (Pywen üzerinden) |
+| Google | Gemini (varsayılan cloud profili: gemini-2.5-flash) |
+| Yerel | Gemma (Ollama, yerel profil: gemma4:latest) |
 
 ---
 
@@ -169,8 +262,8 @@ python -m build
 
 **Konfigürasyon:**
 ```bash
-cp cli/.env.example cli/.env
-# .env dosyasını düzenle (API key'ler, LLM ayarları)
+cp cli/config/sentinel.example.yaml cli/config/sentinel.yaml
+# sentinel.yaml dosyasını düzenle (API key env, LLM ayarları, memory vb.)
 ```
 
 ---
@@ -185,9 +278,9 @@ cp cli/.env.example cli/.env
 > |---|---|---|
 > | `agentic/Pywen-dev/` | **Pywen** — Çok modelli Python araştırma agent framework'ü (Qwen3, Claude, Codex, Gemini destekli) | Python 3.10–3.12, openai, anthropic, tree-sitter, textual |
 > | `agentic/codex-main/` | **Codex CLI** — OpenAI'nin kaynak kodlu TypeScript/Rust coding agent'ı | TypeScript, Rust, Bazel, React/Ink |
-> | `agentic/claude/` | **Claude Code** — Anthropic'in TypeScript tabanlı kod asistanı | TypeScript, Node.js |
+> | `agentic/cli-claude/` | **Claude Code** — Anthropic'in TypeScript tabanlı kod asistanı | TypeScript, Node.js |
 >
-> Bu ürünler; ihtiyaç duyulduğunda referans alınmak, belirli bileşenler ödünç alınarak Sentinel'e entegre edilmek üzere burada saklanmaktadır. Sentinel'in ana geliştirme akışından bağımsız olarak değerlendirilmelidir.
+> Bu ürünler; ihtiyaç duyulduğunda referans alınmak, belirli bileşenler ödünç alınarak Sentinel'e entegre edilmek üzere burada saklanmaktadır. Özellikle `cli-claude/` içindeki bellek (auto-dream, extract memories, magic docs, away summary) ve güvenlik (tool isolation, hook pipeline) davranışları Sentinel CLI'ye Python'da yeniden yazılarak aktarılmıştır. Sentinel'in ana geliştirme akışından bağımsız olarak değerlendirilmelidir.
 
 ---
 
